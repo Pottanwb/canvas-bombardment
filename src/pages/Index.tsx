@@ -87,6 +87,8 @@ const Index = () => {
       createdAt: number;
       kind: 'nuclear';
       lifeMs: number;
+      hitBomber?: boolean;
+      hitBoy?: boolean;
     };
     const explosions: Explosion[] = [];
 
@@ -108,13 +110,18 @@ const Index = () => {
     const bomber: Actor = { x: -200, y: groundY() - 200, w: 110, h: 34, alive: false, animTime: 0 };
 
     let score = 0;
+    let scorePulse = 0;
+    type Popup = { x: number; y: number; text: string; life: number; maxLife: number };
+    const popups: Popup[] = [];
     let startTime = performance.now();
     let lastTime = startTime;
 
-    // Glitch effect
-    let glitchActive = false;
-    let glitchStart = 0;
-    const glitchDuration = 800; // ms
+    // Earthquake crash effect
+    let quakeActive = false;
+    let quakeStart = 0;
+    const quakeDuration = 2200; // ms
+    type Building = { x: number; y: number; w: number; h: number; angle: number; angVel: number; vx: number; vy: number; color: string };
+    const buildings: Building[] = [];
     let reloadQueued = false;
 
     const spawnExplosion = (x: number, y: number) => {
@@ -180,11 +187,29 @@ const Index = () => {
 
     const drawScore = () => {
       ctx.save();
+      const scale = 1 + 0.35 * scorePulse;
+      ctx.translate(12, 12);
+      ctx.scale(scale, scale);
       ctx.fillStyle = "#ffffff";
       ctx.font = "bold 18px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
-      ctx.fillText(`Score: ${score}`, 12, 10);
+      ctx.shadowColor = "rgba(255,255,255,0.4)";
+      ctx.shadowBlur = 8 * scorePulse;
+      ctx.fillText(`Score: ${score}`, 0, 0);
+      ctx.restore();
+    };
+
+    const drawPopups = () => {
+      ctx.save();
+      for (const p of popups) {
+        const alpha = Math.max(0, 1 - p.life / p.maxLife);
+        ctx.fillStyle = `rgba(34,197,94,${alpha})`;
+        ctx.font = "bold 16px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(p.text, p.x, p.y);
+      }
       ctx.restore();
     };
 
@@ -442,6 +467,43 @@ const Index = () => {
     };
 
     const update = (dt: number) => {
+      // helpers
+      const spawnBomber = () => {
+        bomber.alive = true;
+        bomber.animTime = 0;
+        bomber.x = -200;
+        bomber.y = groundY() - 200;
+      };
+      const triggerEarthquake = () => {
+        quakeActive = true;
+        quakeStart = performance.now();
+        buildings.length = 0;
+        const base = groundY();
+        const cols = Math.max(6, Math.ceil(width / 120));
+        for (let i = 0; i < cols; i++) {
+          const bw = 60 + Math.random() * 60;
+          const bh = 80 + Math.random() * 140;
+          const bx = (i + 0.5) * (width / cols);
+          const by = base;
+          buildings.push({
+            x: bx,
+            y: by,
+            w: bw,
+            h: bh,
+            angle: 0,
+            angVel: (Math.random() - 0.5) * 0.0025,
+            vx: (Math.random() - 0.5) * 0.02,
+            vy: -0.02 - Math.random() * 0.02,
+            color: `hsl(${200 + Math.random() * 40}, 10%, ${20 + Math.random() * 20}%)`,
+          });
+        }
+        if (!reloadQueued) {
+          reloadQueued = true;
+          setTimeout(() => window.location.reload(), quakeDuration + 300);
+        }
+      };
+
+      // missile follow
       if (firstClickHandled) {
         missile.pos.x += (mouse.x - missile.pos.x) * missile.speed;
         missile.pos.y += (mouse.y - missile.pos.y) * missile.speed;
@@ -460,12 +522,11 @@ const Index = () => {
           boy.y = groundY() - 8;
         }
         if (!bomber.alive) {
-          bomber.alive = true;
-          bomber.x = -200;
-          bomber.y = groundY() - 200;
+          spawnBomber();
         }
       }
 
+      // move boy
       if (boy.alive) {
         boy.x += 0.12 * dt; // ~120 px/s
         if (boy.x - boy.w / 2 > width + 40) {
@@ -473,6 +534,7 @@ const Index = () => {
         }
       }
 
+      // bomber behavior
       if (bomber.alive && boy.alive) {
         const targetX = boy.x - 160;
         const targetY = boy.y - 180;
@@ -483,48 +545,84 @@ const Index = () => {
         if (bomber.x - bomber.w / 2 > width + 60) bomber.x = -120;
       }
 
+      // score pulse decay and popup updates
+      scorePulse = Math.max(0, scorePulse - dt / 400);
+      for (let i = popups.length - 1; i >= 0; i--) {
+        const p = popups[i];
+        p.life += dt;
+        p.y -= 0.035 * dt;
+        if (p.life >= p.maxLife) popups.splice(i, 1);
+      }
+
       // collisions
       for (const ex of explosions) {
         if (!ex.alive) continue;
-        if (bomber.alive && circleHit(ex, bomber.x, bomber.y, 40)) {
-          // count once per explosion by marking dead soon after life
-          // (score increments naturally many times; clamp it here)
-          // We can simply set alive=false right away to avoid multi-hit
-        }
-        if (bomber.alive && circleHit(ex, bomber.x, bomber.y, 40)) {
+        // Bomber destruction
+        if (bomber.alive && !ex.hitBomber && circleHit(ex, bomber.x, bomber.y, 40)) {
+          ex.hitBomber = true;
           score += 1;
+          scorePulse = 1;
+          popups.push({ x: bomber.x, y: bomber.y - 20, text: "+1", life: 0, maxLife: 900 });
+          spawnExplosion(bomber.x, bomber.y);
+          bomber.alive = false;
+          setTimeout(() => { if (running) spawnBomber(); }, 1200);
         }
-        if (boy.alive && circleHit(ex, boy.x, boy.y - boy.h / 2, 28)) {
+        // Boy hit -> earthquake crash
+        if (boy.alive && !ex.hitBoy && circleHit(ex, boy.x, boy.y - boy.h / 2, 28)) {
+          ex.hitBoy = true;
           boy.alive = false;
-          glitchActive = true;
-          glitchStart = performance.now();
-          if (!reloadQueued) {
-            reloadQueued = true;
-            setTimeout(() => window.location.reload(), glitchDuration + 150);
-          }
+          triggerEarthquake();
         }
       }
     };
 
-    const drawGlitch = () => {
-      const elapsed = performance.now() - glitchStart;
-      const p = clamp(elapsed / glitchDuration, 0, 1);
-      const slices = 20;
-      for (let i = 0; i < slices; i++) {
-        const y = Math.random() * height;
-        const h = 4 + Math.random() * 14;
-        const xOff = (Math.random() - 0.5) * 30 * (1 + p);
-        ctx.fillStyle = `rgba(${100 + Math.random() * 155},${100 + Math.random() * 155},255,${0.12 + Math.random() * 0.18})`;
-        ctx.fillRect(0 + xOff, y, width, h);
-      }
-      ctx.strokeStyle = `rgba(255,255,255,${0.15 + Math.random() * 0.25})`;
-      ctx.lineWidth = 1;
-      for (let i = 0; i < 6; i++) {
+    const drawEarthquake = (dt: number) => {
+      const elapsed = performance.now() - quakeStart;
+      const p = clamp(elapsed / quakeDuration, 0, 1);
+      const shakeAmp = (1 - p) * 10;
+
+      ctx.save();
+      ctx.translate((Math.random() - 0.5) * shakeAmp, (Math.random() - 0.5) * shakeAmp);
+
+      // update and draw buildings
+      const base = groundY();
+      for (const b of buildings) {
+        // physics
+        b.vy += 0.0004 * dt;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        b.angle += b.angVel * dt;
+
+        // draw building (bottom-centered)
+        ctx.save();
+        ctx.translate(b.x, b.y);
+        ctx.rotate(b.angle);
+        ctx.fillStyle = b.color;
         ctx.beginPath();
-        ctx.moveTo(Math.random() * width, Math.random() * height);
-        for (let j = 0; j < 5; j++) ctx.lineTo(Math.random() * width, Math.random() * height);
-        ctx.stroke();
+        ctx.rect(-b.w / 2, -b.h, b.w, b.h);
+        ctx.fill();
+        // windows
+        ctx.fillStyle = "rgba(255,255,255,0.08)";
+        const rows = Math.max(3, Math.floor(b.h / 20));
+        const cols = Math.max(2, Math.floor(b.w / 16));
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const wx = -b.w / 2 + 6 + c * (b.w - 12) / cols;
+            const wy = -b.h + 8 + r * (b.h - 16) / rows;
+            ctx.fillRect(wx, wy, 6, 8);
+          }
+        }
+        ctx.restore();
       }
+
+      // dust plume near ground
+      const dust = ctx.createLinearGradient(0, base, 0, base - 160);
+      dust.addColorStop(0, "rgba(120,120,120,0.35)");
+      dust.addColorStop(1, "rgba(120,120,120,0)");
+      ctx.fillStyle = dust;
+      ctx.fillRect(0, base - 160, width, 160);
+
+      ctx.restore();
     };
 
     const loop = (time: number) => {
@@ -542,6 +640,7 @@ const Index = () => {
       drawParticles(dt);
       drawBoy(boy, dt);
       drawBomber(bomber, dt);
+      drawPopups();
       drawScore();
 
       // cleanup explosions by life
@@ -553,8 +652,8 @@ const Index = () => {
         }
       }
 
-      if (glitchActive) {
-        drawGlitch();
+      if (quakeActive) {
+        drawEarthquake(dt);
       }
 
       if (!firstClickHandled) {
